@@ -1,0 +1,48 @@
+name: Sync TFMP Systems
+
+on:
+  # كل يوم من الأحد إلى الخميس الساعة 6 صباحًا بتوقيت السعودية (3 صباحًا UTC)
+  schedule:
+    - cron: '0 3 * * 0-4'
+  # زر "Run workflow" للتشغيل اليدوي
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tfmp-systems
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: سحب ملف الأنظمة من TFMP
+        env:
+          TFMP_USERNAME: ${{ secrets.TFMP_USERNAME }}
+          TFMP_PASSWORD: ${{ secrets.TFMP_PASSWORD }}
+        run: node scripts/sync-tfmp-systems.js
+
+      - name: حفظ ورفع النتيجة
+        run: |
+          git config user.name "tfmp-bot"
+          git config user.email "actions@github.com"
+          git add -A -- data/tfmp/systems.json
+          if git diff --staged --quiet; then
+            echo "لا توجد بيانات جديدة"
+            exit 0
+          fi
+          git commit -q -m "تحديث تلقائي: بيانات الأنظمة من TFMP"
+          for i in 1 2 3; do
+            if git push -q; then echo "✔ تم الرفع"; break; fi
+            git pull --rebase -q
+            sleep 5
+          done
