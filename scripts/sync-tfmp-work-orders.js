@@ -1,31 +1,50 @@
 /**
- * يسحب تصدير "Work Orders" من TFMP (ملف xlsx بخمسة شيتات: Work Orders, Inspection
- * Details, CA Details, IR Details, Checklist Details) ويحفظ كل شيت كملف JSON منفصل
- * في data/tfmp/work_orders/، بنفس شكل data/tfmp/systems.json الحالي:
- *   { fetched_at, source, count, headers, rows }
+ * يسحب أوامر العمل من TFMP بكل حالاتها ويحفظها في data/tfmp/work_orders/،
+ * بنفس شكل data/tfmp/systems.json الحالي: { fetched_at, source, count, headers, rows }
  *
  * هذا سكربت مستقل تمامًا عن scripts/sync-tfmp-systems.js (سحب "CA Scorecard")
  * ولا يغيّره ولا يمسّ data/tfmp/systems.json — الاثنان يعملان جنبًا إلى جنب.
  *
- * ★ 2026-11-01 (بناءً على طلب صريح): شِلنا فلتر status=COMPLETED وفلتر
- * التواريخ completion_from/completion_to خالص — الرابط بقى بدون أي فلتر
- * حالة أو تاريخ (بالظبط زي الرابط اللي اتبعت)، فبيرجع كل أوامر العمل
- * بكل حالاتها (ASSIGNED, IN PROGRESS, EXPIRED, COMPLETED, ...) مش
- * المكتملة بس. ده عشان الداشبورد يقدر يحسب "المخطط" (أوامر لسه مفتوحة:
- * Assigned/In Progress/Expired) مقابل "المكتمل" (Completed) لكل مدينة،
- * ونسبة إنجاز حقيقية = المكتمل ÷ المخطط.
+ * ★ 2026-11-02 (بناءً على تجربة فعلية مع واجهة التصدير في TFMP، بما فيها
+ * شاشة "Download Work Orders" نفسها — راجع لقطة الشاشة اللي بعتها): لقينا
+ * إن فيه طريقتين تحميل مختلفتين في TFMP:
+ *   1) رابط export.xlsx?lang=en بدون أي فلتر status خالص — ده بيرجع كل
+ *      أوامر العمل بكل حالاتها في شيت "Work Orders" واحد، مش بس COMPLETED
+ *      (جُرِّب فعليًا: 58,336 صف يشمل COMPLETED + EXPIRED + ASSIGNED +
+ *      CANCELLED — لاحظنا كمان وجود حالة "CANCELLED" ما كناش ناخدها
+ *      بالحسبان قبل كده). الطلب ده بسيط ومباشر ومفيهوش قيد الفلتر خالص.
+ *   2) تفعيل "Include submission details" (= include_inspection=true) من
+ *      نفس الشاشة — ده اللي بيفرض فلتر تاريخ/شهر إجباري (جرّبناه وطلع
+ *      HTTP 422: "Exporting submission details needs a filter: choose an
+ *      assignment month, or a completion date from which to start" من غيره).
+ *      فبنستخدمه بس مع status=COMPLETED + completion_from/completion_to
+ *      عشان نجيب شيتات التفاصيل (Inspection/CA/IR/Checklist) اللي أصلًا
+ *      مالهاش معنى غير للأوامر المكتملة.
  *
- * الخطوات: (1) تسجيل الدخول (2) تنزيل ملف xlsx (3) قراءة الشيتات الخمسة
- * (4) فحص كل شيت على حدة (5) كتابة الملفات — ولا يُستبدل أي ملف إلا عند
- * نجاح كل الفحوصات، فتبقى آخر نسخة سليمة إن فشل التشغيل.
+ * فبقينا نسحب طلبين بس:
+ *   • ALL      → export.xlsx?lang=en (بدون فلتر) لشيت "Work Orders" بكل
+ *                الحالات — ده المصدر الوحيد لملف work-orders.json
+ *   • DETAILS  → export.xlsx?status=COMPLETED&completion_from=…&
+ *                completion_to=…&include_inspection=true&lang=en، ومنه
+ *                بناخد بس شيتات Inspection/CA/IR/Checklist (شيت Work
+ *                Orders بتاعه نفسه بنتجاهله لأن عندنا نسخة أشمل من ALL)
+ * (المشروع بدأ فعليًا من يناير 2026، فمفيش داعي نرجع لتاريخ أبعد من كده
+ * في completion_from — راجع WO_COMPLETED_FROM تحت لو احتجت تغييره.)
+ *
+ * الخطوات: (1) تسجيل الدخول (2) تنزيل الملفين (3) قراءة شيت Work Orders من
+ * ALL + الشيتات التفصيلية الأربعة من DETAILS (4) فحص كل شيت على حدة
+ * (5) كتابة الملفات — ولا يُستبدل أي ملف إلا عند نجاح كل الفحوصات، فتبقى
+ * آخر نسخة سليمة إن فشل التشغيل.
  *
  * GitHub Secrets (نفس أسرار سحب الـ FCA الحالي، لا تُكتب قيمها في أي ملف):
  *   TFMP_USERNAME , TFMP_PASSWORD
  * اختياري (GitHub Variables أو env):
- *   TFMP_BASE            الافتراضي https://tfmp.meem-edgenta.tech
- *   WO_EXPORT_URL         لتجاوز بناء الرابط تمامًا عند الحاجة (مثلاً
- *                         لإضافة فلتر تاريخ/حالة لاحقًا لو احتجنا)
- * اختياري للاختبار فقط: XLSX_FILE (قراءة ملف محلي بدل التنزيل)، OUT_DIR
+ *   TFMP_BASE                 الافتراضي https://tfmp.meem-edgenta.tech
+ *   WO_COMPLETED_FROM          الافتراضي 2026-01-01 (completion_from لطلب DETAILS)
+ *   WO_EXPORT_URL_ALL          لتجاوز بناء رابط ALL تمامًا عند الحاجة
+ *   WO_EXPORT_URL_DETAILS      لتجاوز بناء رابط DETAILS تمامًا عند الحاجة
+ * اختياري للاختبار فقط: XLSX_FILE (قراءة ملف محلي واحد بشيتاته الخمسة بدل
+ * الطلبين — مفيد لاختبار منطق قراءة الشيتات التفصيلية فقط)، OUT_DIR
  *
  * يحتاج مكتبة xlsx (SheetJS) — تُثبَّت في workflow بـ: npm install xlsx --no-save
  */
@@ -35,10 +54,15 @@ const XLSX = require('xlsx');
 
 const BASE = (process.env.TFMP_BASE || 'https://tfmp.meem-edgenta.tech').replace(/\/$/, '');
 const LOGIN_URL = BASE + '/api/v1/auth/login';
-// بدون فلتر status أو تاريخ — بيرجع كل أوامر العمل بكل حالاتها (راجع الملاحظة فوق)
-const EXPORT_URL =
-  process.env.WO_EXPORT_URL ||
-  BASE + '/api/v1/admin/work-orders/export.xlsx?include_inspection=true&lang=en';
+const TODAY = new Date().toISOString().slice(0, 10);
+// المشروع بدأ من يناير 2026 — مفيش بيانات قبل كده، فده يغطي كل التاريخ فعليًا
+const COMPLETED_FROM = process.env.WO_COMPLETED_FROM || '2026-01-01';
+const EXPORT_URL_ALL =
+  process.env.WO_EXPORT_URL_ALL ||
+  BASE + '/api/v1/admin/work-orders/export.xlsx?lang=en';
+const EXPORT_URL_DETAILS =
+  process.env.WO_EXPORT_URL_DETAILS ||
+  BASE + '/api/v1/admin/work-orders/export.xlsx?completion_from=' + COMPLETED_FROM + '&completion_to=' + TODAY + '&status=COMPLETED&include_inspection=true&lang=en';
 const XLSX_FILE = process.env.XLSX_FILE || '';
 const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, '..', 'data', 'tfmp', 'work_orders');
 const USER = process.env.TFMP_USERNAME || '';
@@ -145,13 +169,14 @@ const SHEETS = [
   },
 ];
 
-function readSheet(wb, cfg) {
+function readSheet(wb, cfg, opts) {
+  opts = opts || {};
   const ws = wb.Sheets[cfg.sheet];
   if (!ws) throw new Error('الشيت "' + cfg.sheet + '" غير موجود في الملف — تحقق من include_inspection=true في رابط التصدير');
   // header:1 يعطي مصفوفة صفوف خام، أول صف هو رؤوس الأعمدة. raw:true يحافظ على خلايا
   // التاريخ ككائن Date حقيقي (بفضل cellDates:true عند القراءة) بدل نص منسّق قد يُفقد فيه اليوم/الشهر
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
-  if (!aoa.length) throw new Error('الشيت "' + cfg.sheet + '" فارغ');
+  if (!aoa.length) throw new Error('الشيت "' + cfg.sheet + '" فارغ تمامًا (بدون حتى صف العناوين)');
   const headers = aoa[0].map((h) => String(h == null ? '' : h).trim());
   const missing = cfg.required.filter((h) => !headers.includes(h));
   if (missing.length) throw new Error('الشيت "' + cfg.sheet + '": أعمدة ناقصة: ' + missing.join(' | '));
@@ -160,7 +185,9 @@ function readSheet(wb, cfg) {
   const rows = aoa.slice(1).filter((r) => r.some((v) => v !== '' && v != null));
   rows.forEach((r) => { dateIdx.forEach((i) => { r[i] = normDate(r[i]); }); });
 
-  if (!rows.length) throw new Error('الشيت "' + cfg.sheet + '" بلا بيانات بعد التحقق');
+  // allowEmpty: بعض الحالات (مثلًا "IN PROGRESS") ممكن يكون عددها صفر دلوقتي
+  // بشكل طبيعي تمامًا (مفيش أوامر في هذه الحالة حاليًا) — ده مش خطأ
+  if (!rows.length && !opts.allowEmpty) throw new Error('الشيت "' + cfg.sheet + '" بلا بيانات بعد التحقق');
   return { headers, rows };
 }
 
@@ -179,21 +206,35 @@ function prepare(cfg, table) {
   return { file, out: { fetched_at: new Date().toISOString(), source: cfg.source, count: table.rows.length, headers: table.headers, rows: table.rows } };
 }
 
+const WO_SHEET_CFG = SHEETS[0]; // "Work Orders" — أول عنصر في SHEETS
+const DETAIL_SHEETS = SHEETS.slice(1); // Inspection/CA/IR/Checklist — من طلب DETAILS بس
+
+async function fetchWorkbook(url, label) {
+  if (!url.startsWith(BASE + '/')) throw new Error('رابط ' + label + ' يجب أن يكون على نفس نطاق TFMP (' + BASE + ') حتى لا تُرسَل بيانات الدخول لجهة أخرى');
+  console.log('  ← ' + label + ' …');
+  const buf = await getBinary(url);
+  return XLSX.read(buf, { type: 'buffer', cellDates: true });
+}
+
 async function main() {
-  let buf;
+  let woTable, detailsWb;
+
   if (XLSX_FILE) {
-    buf = fs.readFileSync(XLSX_FILE);
-    console.log('(وضع الاختبار) قراءة الملف المحلي');
+    console.log('(وضع الاختبار) قراءة الملف المحلي — بيتعامل معاملة ملف DETAILS الكامل (5 شيتات)');
+    const buf = fs.readFileSync(XLSX_FILE);
+    detailsWb = XLSX.read(buf, { type: 'buffer', cellDates: true });
+    woTable = readSheet(detailsWb, WO_SHEET_CFG);
   } else {
-    if (!EXPORT_URL.startsWith(BASE + '/')) throw new Error('رابط التصدير يجب أن يكون على نفس نطاق TFMP (' + BASE + ') حتى لا تُرسَل بيانات الدخول لجهة أخرى');
-    console.log('… سحب كل أوامر العمل بكل حالاتها (بدون فلتر status أو تاريخ)');
+    console.log('… سحب أوامر العمل: طلب واحد بكل الحالات + طلب تفاصيل التنفيذ للمكتملة');
     await login();
-    buf = await getBinary(EXPORT_URL);
+    const allWb = await fetchWorkbook(EXPORT_URL_ALL, 'ALL (كل الحالات)');
+    woTable = readSheet(allWb, WO_SHEET_CFG);
+    console.log('    ' + woTable.rows.length + ' صف (كل الحالات)');
+    detailsWb = await fetchWorkbook(EXPORT_URL_DETAILS, 'DETAILS (COMPLETED + تفاصيل التنفيذ)');
   }
 
-  const wb = XLSX.read(buf, { type: 'buffer', cellDates: true });
-
-  const tables = SHEETS.map((cfg) => ({ cfg, table: readSheet(wb, cfg) }));
+  const tables = [{ cfg: WO_SHEET_CFG, table: woTable }];
+  for (const cfg of DETAIL_SHEETS) tables.push({ cfg, table: readSheet(detailsWb, cfg) });
 
   const ready = tables.map(({ cfg, table }) => prepare(cfg, table)).filter(Boolean);
   fs.mkdirSync(OUT_DIR, { recursive: true });
