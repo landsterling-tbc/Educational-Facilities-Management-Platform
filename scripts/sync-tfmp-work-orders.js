@@ -7,8 +7,13 @@
  * هذا سكربت مستقل تمامًا عن scripts/sync-tfmp-systems.js (سحب "CA Scorecard")
  * ولا يغيّره ولا يمسّ data/tfmp/systems.json — الاثنان يعملان جنبًا إلى جنب.
  *
- * الفترة: من 2026-06-01 ثابتة، وحتى تاريخ اليوم (نافذة متحركة تكبر كل يوم).
- * الحالة: COMPLETED فقط (بنفس رابط التصدير الذي يُستخدم يدويًا).
+ * ★ 2026-11-01 (بناءً على طلب صريح): شِلنا فلتر status=COMPLETED وفلتر
+ * التواريخ completion_from/completion_to خالص — الرابط بقى بدون أي فلتر
+ * حالة أو تاريخ (بالظبط زي الرابط اللي اتبعت)، فبيرجع كل أوامر العمل
+ * بكل حالاتها (ASSIGNED, IN PROGRESS, EXPIRED, COMPLETED, ...) مش
+ * المكتملة بس. ده عشان الداشبورد يقدر يحسب "المخطط" (أوامر لسه مفتوحة:
+ * Assigned/In Progress/Expired) مقابل "المكتمل" (Completed) لكل مدينة،
+ * ونسبة إنجاز حقيقية = المكتمل ÷ المخطط.
  *
  * الخطوات: (1) تسجيل الدخول (2) تنزيل ملف xlsx (3) قراءة الشيتات الخمسة
  * (4) فحص كل شيت على حدة (5) كتابة الملفات — ولا يُستبدل أي ملف إلا عند
@@ -18,8 +23,8 @@
  *   TFMP_USERNAME , TFMP_PASSWORD
  * اختياري (GitHub Variables أو env):
  *   TFMP_BASE            الافتراضي https://tfmp.meem-edgenta.tech
- *   WO_FROM_DATE          الافتراضي 2026-06-01 (completion_from الثابت)
- *   WO_EXPORT_URL         لتجاوز بناء الرابط تمامًا عند الحاجة
+ *   WO_EXPORT_URL         لتجاوز بناء الرابط تمامًا عند الحاجة (مثلاً
+ *                         لإضافة فلتر تاريخ/حالة لاحقًا لو احتجنا)
  * اختياري للاختبار فقط: XLSX_FILE (قراءة ملف محلي بدل التنزيل)، OUT_DIR
  *
  * يحتاج مكتبة xlsx (SheetJS) — تُثبَّت في workflow بـ: npm install xlsx --no-save
@@ -30,14 +35,10 @@ const XLSX = require('xlsx');
 
 const BASE = (process.env.TFMP_BASE || 'https://tfmp.meem-edgenta.tech').replace(/\/$/, '');
 const LOGIN_URL = BASE + '/api/v1/auth/login';
-const FROM_DATE = process.env.WO_FROM_DATE || '2026-06-01';
-const TODAY = new Date().toISOString().slice(0, 10);
+// بدون فلتر status أو تاريخ — بيرجع كل أوامر العمل بكل حالاتها (راجع الملاحظة فوق)
 const EXPORT_URL =
   process.env.WO_EXPORT_URL ||
-  BASE +
-    '/api/v1/admin/work-orders/export.xlsx?completion_from=' + FROM_DATE +
-    '&completion_to=' + TODAY +
-    '&status=COMPLETED&include_inspection=true&lang=en';
+  BASE + '/api/v1/admin/work-orders/export.xlsx?include_inspection=true&lang=en';
 const XLSX_FILE = process.env.XLSX_FILE || '';
 const OUT_DIR = process.env.OUT_DIR || path.join(__dirname, '..', 'data', 'tfmp', 'work_orders');
 const USER = process.env.TFMP_USERNAME || '';
@@ -163,7 +164,7 @@ function prepare(cfg, table) {
   const file = path.join(OUT_DIR, cfg.file);
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {}
-  // النافذة الزمنية تكبر كل يوم ولا تصغر أبدًا (completion_from ثابت)، فانخفاض كبير مفاجئ في العدد مريب
+  // فحص سلامة عام: انخفاض كبير مفاجئ في عدد الصفوف عن آخر سحب ناجح مريب (ممكن يبقى خطأ في الرابط أو التصريح)
   if (prev && prev.count && table.rows.length < prev.count * 0.9) {
     throw new Error(cfg.sheet + ': عدد الصفوف الجديد (' + table.rows.length + ') أقل بكثير من السابق (' + prev.count + ') — لن يُستبدل الملف');
   }
@@ -181,7 +182,7 @@ async function main() {
     console.log('(وضع الاختبار) قراءة الملف المحلي');
   } else {
     if (!EXPORT_URL.startsWith(BASE + '/')) throw new Error('رابط التصدير يجب أن يكون على نفس نطاق TFMP (' + BASE + ') حتى لا تُرسَل بيانات الدخول لجهة أخرى');
-    console.log('… الفترة: من ' + FROM_DATE + ' إلى ' + TODAY + ' (COMPLETED فقط)');
+    console.log('… سحب كل أوامر العمل بكل حالاتها (بدون فلتر status أو تاريخ)');
     await login();
     buf = await getBinary(EXPORT_URL);
   }
