@@ -40,11 +40,28 @@
  * (المشروع بدأ فعليًا من يناير 2026، فمفيش داعي نرجع لتاريخ أبعد من كده
  * في completion_from — راجع WO_COMPLETED_FROM تحت لو احتجت تغييره.)
  *
+ * ★★★ 2026-11-02 (تحديث ثالث — إصلاح فشل فعلي تاني في GitHub Actions بعد
+ * التقسيم الشهري): شهر يناير (أول شهر في المشروع) رجّع ملف من غير شيت
+ * "CA Details" خالص (مش شيت فاضي — الشيت مش موجود في الملف أصلًا)، لأنه
+ * في هذا الشهر مفيش ولا صف واحد بتقييم CA. يعني TFMP بيحذف الشيت كله من
+ * ملف الإكسل لو مفيهوش ولا صف، مش بس بيسيبه فاضي بعنوانه. قبل كده كنا
+ * بنتعامل مع "allowEmpty" على إنه شيت موجود لكن صفوفه صفر — دلوقتي
+ * بقى الشيت ممكن "مش موجود خالص" برضه حالة طبيعية (مش خطأ) ويتعامل
+ * معاه بنفس المعنى: 0 صف لهذا الشهر لهذا الشيت بالذات. كمان أضفنا:
+ *   • مهلة زمنية (timeout) 90 ثانية لكل طلب تنزيل — لو السيرفر علّق
+ *     (hang) من غير ما يرجع حتى خطأ، بنوقف الطلب ونعيد المحاولة بدل ما
+ *     نستنى لحد ما الـ Action نفسه ينتهي بالـ timeout العام بتاعه.
+ *   • تأكيد إن رؤوس الأعمدة (headers) ثابتة بين كل شهور نفس الشيت —
+ *     لو شهر رجّع رؤوس مختلفة عن باقي الشهور (يدل على تغيير في شكل
+ *     التصدير من عند TFMP) بيوقف السكربت بخطأ واضح بدل ما يخلط بيانات
+ *     غلط في أعمدة غلط بصمت.
+ *
  * الخطوات: (1) تسجيل الدخول (2) تنزيل ملف ALL (3) تنزيل ملفات DETAILS
- * شهرًا بشهر ودمج شيتاتها الأربعة (4) قراءة شيت Work Orders من ALL +
- * الشيتات التفصيلية المدمجة (5) فحص كل شيت على حدة (6) كتابة الملفات —
- * ولا يُستبدل أي ملف إلا عند نجاح كل الفحوصات، فتبقى آخر نسخة سليمة إن
- * فشل التشغيل.
+ * شهرًا بشهر ودمج شيتاتها الأربعة (شيت مفقود لشهر = 0 صف لهذا الشهر،
+ * مش خطأ) (4) قراءة شيت Work Orders من ALL + الشيتات التفصيلية المدمجة
+ * (5) فحص كل شيت على حدة (أعمدة إلزامية + ثبات الرؤوس بين الشهور)
+ * (6) كتابة الملفات — ولا يُستبدل أي ملف إلا عند نجاح كل الفحوصات، فتبقى
+ * آخر نسخة سليمة إن فشل التشغيل.
  *
  * GitHub Secrets (نفس أسرار سحب الـ FCA الحالي، لا تُكتب قيمها في أي ملف):
  *   TFMP_USERNAME , TFMP_PASSWORD
@@ -97,16 +114,26 @@ async function login() {
   console.log('✔ تم تسجيل الدخول');
 }
 
+const FETCH_TIMEOUT_MS = Number(process.env.WO_FETCH_TIMEOUT_MS || 90000);
+
 // مثل getText في سكربت systems، لكن يرجع Buffer ثنائي (الملف xlsx) بدل نص
 async function getBinary(url, attempt = 1, relogins = 0) {
   let res;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
-    res = await fetch(url, {
-      headers: { Accept: 'application/octet-stream,*/*', Authorization: 'Bearer ' + token, Cookie: 'tfmp_session=' + token },
-    });
-  } catch (e) {
-    if (attempt < 3) { await sleep(1000 * attempt); return getBinary(url, attempt + 1, relogins); }
-    throw e;
+    try {
+      res = await fetch(url, {
+        headers: { Accept: 'application/octet-stream,*/*', Authorization: 'Bearer ' + token, Cookie: 'tfmp_session=' + token },
+        signal: ac.signal,
+      });
+    } catch (e) {
+      const isTimeout = e && e.name === 'AbortError';
+      if (attempt < 3) { await sleep(1000 * attempt); return getBinary(url, attempt + 1, relogins); }
+      throw isTimeout ? new Error('انتهت مهلة الطلب (' + Math.round(FETCH_TIMEOUT_MS / 1000) + 'ث) بعد 3 محاولات — السيرفر لم يرد خالص') : e;
+    }
+  } finally {
+    clearTimeout(timer);
   }
   if (res.status === 401 || res.status === 403) {
     if (relogins >= 2) throw new Error('رفض الخادم التصريح (HTTP ' + res.status + ') حتى بعد إعادة تسجيل الدخول');
@@ -184,7 +211,13 @@ const SHEETS = [
 function readSheet(wb, cfg, opts) {
   opts = opts || {};
   const ws = wb.Sheets[cfg.sheet];
-  if (!ws) throw new Error('الشيت "' + cfg.sheet + '" غير موجود في الملف — تحقق من include_inspection=true في رابط التصدير');
+  if (!ws) {
+    // TFMP بيحذف الشيت كله من ملف الإكسل (مش بس بيسيبه فاضي) لو مفيش ولا صف
+    // بيستحق هذا الشيت في المدى المطلوب (مثال فعلي: يناير 2026 من غير أي
+    // صف CA Details). مع allowEmpty ده مش خطأ — يُعامل كـ 0 صف لهذا الطلب.
+    if (opts.allowEmpty) return { headers: [], rows: [] };
+    throw new Error('الشيت "' + cfg.sheet + '" غير موجود في الملف — تحقق من include_inspection=true في رابط التصدير');
+  }
   // header:1 يعطي مصفوفة صفوف خام، أول صف هو رؤوس الأعمدة. raw:true يحافظ على خلايا
   // التاريخ ككائن Date حقيقي (بفضل cellDates:true عند القراءة) بدل نص منسّق قد يُفقد فيه اليوم/الشهر
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
@@ -275,14 +308,27 @@ async function main() {
     } else {
       const ranges = monthRanges(COMPLETED_FROM, TODAY);
       console.log('    تقسيم DETAILS على ' + ranges.length + ' شهر لتجنب 504 Gateway Timeout من السيرفر');
-      const merged = {}; // cfg.sheet -> { headers, rows }
+      const merged = {}; // cfg.sheet -> { headers, rows, headerSourceLabel }
       for (const range of ranges) {
         const url = BASE + '/api/v1/admin/work-orders/export.xlsx?completion_from=' + range.from + '&completion_to=' + range.to + '&status=COMPLETED&include_inspection=true&lang=en';
-        const wb = await fetchWorkbook(url, 'DETAILS ' + range.from + ' → ' + range.to);
+        const label = 'DETAILS ' + range.from + ' → ' + range.to;
+        const wb = await fetchWorkbook(url, label);
         for (const cfg of DETAIL_SHEETS) {
           const t = readSheet(wb, cfg, { allowEmpty: true });
-          if (!merged[cfg.sheet]) merged[cfg.sheet] = { headers: t.headers, rows: [] };
-          if (t.headers.length && !merged[cfg.sheet].headers.length) merged[cfg.sheet].headers = t.headers;
+          if (!merged[cfg.sheet]) merged[cfg.sheet] = { headers: [], rows: [], headerSourceLabel: '' };
+          if (t.headers.length) {
+            if (!merged[cfg.sheet].headers.length) {
+              merged[cfg.sheet].headers = t.headers;
+              merged[cfg.sheet].headerSourceLabel = label;
+            } else if (JSON.stringify(merged[cfg.sheet].headers) !== JSON.stringify(t.headers)) {
+              // رؤوس أعمدة مختلفة بين شهرين لنفس الشيت = تغيير في شكل التصدير
+              // من عند TFMP مش متوقّع — نوقف بدل ما نخلط أعمدة مختلفة بصمت
+              throw new Error(
+                'الشيت "' + cfg.sheet + '": رؤوس الأعمدة في ' + label + ' مختلفة عنها في ' + merged[cfg.sheet].headerSourceLabel +
+                ' — (' + t.headers.join(' | ') + ') مقابل (' + merged[cfg.sheet].headers.join(' | ') + ')'
+              );
+            }
+          }
           merged[cfg.sheet].rows.push(...t.rows);
         }
         await sleep(300); // مجرد إراحة بسيطة للسيرفر بين طلب وطلب
