@@ -81,7 +81,11 @@ async function getBinary(url, attempt = 1, relogins = 0) {
     await sleep(2000 * attempt);
     return getBinary(url, attempt + 1, relogins);
   }
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' عند تنزيل ملف التصدير');
+  if (!res.ok) {
+    let bodyTxt = '';
+    try { bodyTxt = (await res.clone().text()).slice(0, 500); } catch (e) {}
+    throw new Error('HTTP ' + res.status + ' عند تنزيل ملف التصدير' + (bodyTxt ? ' — رد الخادم: ' + bodyTxt : ''));
+  }
   const ct = String(res.headers.get('content-type') || '');
   const buf = Buffer.from(await res.arrayBuffer());
   if (ct.includes('text/html') || (buf.length < 2000 && buf.slice(0, 15).toString('utf8').trim().startsWith('<'))) {
