@@ -21,30 +21,41 @@
  *      عشان نجيب شيتات التفاصيل (Inspection/CA/IR/Checklist) اللي أصلًا
  *      مالهاش معنى غير للأوامر المكتملة.
  *
- * فبقينا نسحب طلبين بس:
+ * فبقينا نسحب طلبين:
  *   • ALL      → export.xlsx?lang=en (بدون فلتر) لشيت "Work Orders" بكل
  *                الحالات — ده المصدر الوحيد لملف work-orders.json
  *   • DETAILS  → export.xlsx?status=COMPLETED&completion_from=…&
  *                completion_to=…&include_inspection=true&lang=en، ومنه
  *                بناخد بس شيتات Inspection/CA/IR/Checklist (شيت Work
  *                Orders بتاعه نفسه بنتجاهله لأن عندنا نسخة أشمل من ALL)
+ *
+ * ★★ 2026-11-02 (تحديث ثاني — إصلاح فشل فعلي في GitHub Actions):
+ * طلب DETAILS لمدى زمني طويل دفعة واحدة (من يناير لليوم، ~29 ألف صف ×
+ * 5 شيتات) بيخلي السيرفر ياخد وقت طويل جدًا في توليد الملف، لحد ما nginx
+ * يقطع الاتصال بـ "504 Gateway Time-out" (حصل فعليًا في تشغيل حقيقي).
+ * الحل: تقسيم طلب DETAILS شهرًا بشهر (completion_from/completion_to لكل
+ * شهر على حدة) — كل طلب صغير وبيرجع بسرعة، وبعدين بندمج نتايج الشيتات
+ * الأربعة من كل الشهور في نفس ملفات الخروج النهائية (مفيش تغيير في شكل
+ * الملفات الناتجة ولا في dashboard.js، التقسيم داخلي في السكربت بس).
  * (المشروع بدأ فعليًا من يناير 2026، فمفيش داعي نرجع لتاريخ أبعد من كده
  * في completion_from — راجع WO_COMPLETED_FROM تحت لو احتجت تغييره.)
  *
- * الخطوات: (1) تسجيل الدخول (2) تنزيل الملفين (3) قراءة شيت Work Orders من
- * ALL + الشيتات التفصيلية الأربعة من DETAILS (4) فحص كل شيت على حدة
- * (5) كتابة الملفات — ولا يُستبدل أي ملف إلا عند نجاح كل الفحوصات، فتبقى
- * آخر نسخة سليمة إن فشل التشغيل.
+ * الخطوات: (1) تسجيل الدخول (2) تنزيل ملف ALL (3) تنزيل ملفات DETAILS
+ * شهرًا بشهر ودمج شيتاتها الأربعة (4) قراءة شيت Work Orders من ALL +
+ * الشيتات التفصيلية المدمجة (5) فحص كل شيت على حدة (6) كتابة الملفات —
+ * ولا يُستبدل أي ملف إلا عند نجاح كل الفحوصات، فتبقى آخر نسخة سليمة إن
+ * فشل التشغيل.
  *
  * GitHub Secrets (نفس أسرار سحب الـ FCA الحالي، لا تُكتب قيمها في أي ملف):
  *   TFMP_USERNAME , TFMP_PASSWORD
  * اختياري (GitHub Variables أو env):
  *   TFMP_BASE                 الافتراضي https://tfmp.meem-edgenta.tech
- *   WO_COMPLETED_FROM          الافتراضي 2026-01-01 (completion_from لطلب DETAILS)
+ *   WO_COMPLETED_FROM          الافتراضي 2026-01-01 (completion_from لأول شهر في DETAILS)
  *   WO_EXPORT_URL_ALL          لتجاوز بناء رابط ALL تمامًا عند الحاجة
- *   WO_EXPORT_URL_DETAILS      لتجاوز بناء رابط DETAILS تمامًا عند الحاجة
+ *   WO_EXPORT_URL_DETAILS      لتجاوز التقسيم الشهري كليًا وطلب رابط DETAILS
+ *                              واحد يدويًا (للاختبار فقط — قد يرجع 504 لمدى طويل)
  * اختياري للاختبار فقط: XLSX_FILE (قراءة ملف محلي واحد بشيتاته الخمسة بدل
- * الطلبين — مفيد لاختبار منطق قراءة الشيتات التفصيلية فقط)، OUT_DIR
+ * الطلبات كلها — مفيد لاختبار منطق قراءة الشيتات التفصيلية فقط)، OUT_DIR
  *
  * يحتاج مكتبة xlsx (SheetJS) — تُثبَّت في workflow بـ: npm install xlsx --no-save
  */
@@ -60,6 +71,7 @@ const COMPLETED_FROM = process.env.WO_COMPLETED_FROM || '2026-01-01';
 const EXPORT_URL_ALL =
   process.env.WO_EXPORT_URL_ALL ||
   BASE + '/api/v1/admin/work-orders/export.xlsx?lang=en';
+// يُستخدم فقط لو WO_EXPORT_URL_DETAILS مضبوط يدويًا (تجاوز التقسيم الشهري)
 const EXPORT_URL_DETAILS =
   process.env.WO_EXPORT_URL_DETAILS ||
   BASE + '/api/v1/admin/work-orders/export.xlsx?completion_from=' + COMPLETED_FROM + '&completion_to=' + TODAY + '&status=COMPLETED&include_inspection=true&lang=en';
@@ -185,8 +197,8 @@ function readSheet(wb, cfg, opts) {
   const rows = aoa.slice(1).filter((r) => r.some((v) => v !== '' && v != null));
   rows.forEach((r) => { dateIdx.forEach((i) => { r[i] = normDate(r[i]); }); });
 
-  // allowEmpty: بعض الحالات (مثلًا "IN PROGRESS") ممكن يكون عددها صفر دلوقتي
-  // بشكل طبيعي تمامًا (مفيش أوامر في هذه الحالة حاليًا) — ده مش خطأ
+  // allowEmpty: بعض الحالات أو بعض الشهور ممكن يكون عددها صفر دلوقتي بشكل
+  // طبيعي تمامًا (مفيش أوامر/صفوف في هذا الشهر أو هذه الحالة حاليًا) — ده مش خطأ
   if (!rows.length && !opts.allowEmpty) throw new Error('الشيت "' + cfg.sheet + '" بلا بيانات بعد التحقق');
   return { headers, rows };
 }
@@ -207,7 +219,7 @@ function prepare(cfg, table) {
 }
 
 const WO_SHEET_CFG = SHEETS[0]; // "Work Orders" — أول عنصر في SHEETS
-const DETAIL_SHEETS = SHEETS.slice(1); // Inspection/CA/IR/Checklist — من طلب DETAILS بس
+const DETAIL_SHEETS = SHEETS.slice(1); // Inspection/CA/IR/Checklist — من طلبات DETAILS بس
 
 async function fetchWorkbook(url, label) {
   if (!url.startsWith(BASE + '/')) throw new Error('رابط ' + label + ' يجب أن يكون على نفس نطاق TFMP (' + BASE + ') حتى لا تُرسَل بيانات الدخول لجهة أخرى');
@@ -216,25 +228,68 @@ async function fetchWorkbook(url, label) {
   return XLSX.read(buf, { type: 'buffer', cellDates: true });
 }
 
+// يبني مدايات شهرية [from, to] (نص "YYYY-MM-DD") تغطي بالكامل المدى من
+// fromStr إلى toStr، كل مدى محصور داخل حدود شهر تقويمي واحد (ومقصوص عند
+// طرفي المدى الكلي). الهدف: كل طلب DETAILS يغطي شهر واحد بس فيرجع بسرعة
+// (تجنب 504 Gateway Timeout من السيرفر عند توليد تصدير لمدى طويل دفعة واحدة)
+function monthRanges(fromStr, toStr) {
+  const ranges = [];
+  const [fy, fm] = fromStr.split('-').map(Number);
+  const fromDate = new Date(fromStr + 'T00:00:00Z');
+  const toDate = new Date(toStr + 'T00:00:00Z');
+  let cursor = new Date(Date.UTC(fy, fm - 1, 1));
+  while (cursor <= toDate) {
+    const y = cursor.getUTCFullYear();
+    const m = cursor.getUTCMonth();
+    const monthStart = new Date(Date.UTC(y, m, 1));
+    const monthEndExclusive = new Date(Date.UTC(y, m + 1, 1));
+    const rangeFromDate = monthStart < fromDate ? fromDate : monthStart;
+    const rangeToDate = monthEndExclusive <= toDate ? new Date(monthEndExclusive.getTime() - 86400000) : toDate;
+    ranges.push({ from: rangeFromDate.toISOString().slice(0, 10), to: rangeToDate.toISOString().slice(0, 10) });
+    cursor = monthEndExclusive;
+  }
+  return ranges;
+}
+
 async function main() {
-  let woTable, detailsWb;
+  let tables;
 
   if (XLSX_FILE) {
     console.log('(وضع الاختبار) قراءة الملف المحلي — بيتعامل معاملة ملف DETAILS الكامل (5 شيتات)');
     const buf = fs.readFileSync(XLSX_FILE);
-    detailsWb = XLSX.read(buf, { type: 'buffer', cellDates: true });
-    woTable = readSheet(detailsWb, WO_SHEET_CFG);
+    const wb = XLSX.read(buf, { type: 'buffer', cellDates: true });
+    tables = [{ cfg: WO_SHEET_CFG, table: readSheet(wb, WO_SHEET_CFG) }];
+    for (const cfg of DETAIL_SHEETS) tables.push({ cfg, table: readSheet(wb, cfg, { allowEmpty: true }) });
   } else {
-    console.log('… سحب أوامر العمل: طلب واحد بكل الحالات + طلب تفاصيل التنفيذ للمكتملة');
+    console.log('… سحب أوامر العمل: طلب واحد بكل الحالات + طلبات تفاصيل التنفيذ للمكتملة (مقسّمة شهريًا)');
     await login();
     const allWb = await fetchWorkbook(EXPORT_URL_ALL, 'ALL (كل الحالات)');
-    woTable = readSheet(allWb, WO_SHEET_CFG);
+    const woTable = readSheet(allWb, WO_SHEET_CFG);
     console.log('    ' + woTable.rows.length + ' صف (كل الحالات)');
-    detailsWb = await fetchWorkbook(EXPORT_URL_DETAILS, 'DETAILS (COMPLETED + تفاصيل التنفيذ)');
-  }
+    tables = [{ cfg: WO_SHEET_CFG, table: woTable }];
 
-  const tables = [{ cfg: WO_SHEET_CFG, table: woTable }];
-  for (const cfg of DETAIL_SHEETS) tables.push({ cfg, table: readSheet(detailsWb, cfg) });
+    if (process.env.WO_EXPORT_URL_DETAILS) {
+      // تجاوز يدوي بالرابط كامل (بدون تقسيم شهري) — للاختبار فقط، قد يرجع 504 لمدى طويل
+      const detailsWb = await fetchWorkbook(EXPORT_URL_DETAILS, 'DETAILS (COMPLETED + تفاصيل التنفيذ)');
+      for (const cfg of DETAIL_SHEETS) tables.push({ cfg, table: readSheet(detailsWb, cfg, { allowEmpty: true }) });
+    } else {
+      const ranges = monthRanges(COMPLETED_FROM, TODAY);
+      console.log('    تقسيم DETAILS على ' + ranges.length + ' شهر لتجنب 504 Gateway Timeout من السيرفر');
+      const merged = {}; // cfg.sheet -> { headers, rows }
+      for (const range of ranges) {
+        const url = BASE + '/api/v1/admin/work-orders/export.xlsx?completion_from=' + range.from + '&completion_to=' + range.to + '&status=COMPLETED&include_inspection=true&lang=en';
+        const wb = await fetchWorkbook(url, 'DETAILS ' + range.from + ' → ' + range.to);
+        for (const cfg of DETAIL_SHEETS) {
+          const t = readSheet(wb, cfg, { allowEmpty: true });
+          if (!merged[cfg.sheet]) merged[cfg.sheet] = { headers: t.headers, rows: [] };
+          if (t.headers.length && !merged[cfg.sheet].headers.length) merged[cfg.sheet].headers = t.headers;
+          merged[cfg.sheet].rows.push(...t.rows);
+        }
+        await sleep(300); // مجرد إراحة بسيطة للسيرفر بين طلب وطلب
+      }
+      for (const cfg of DETAIL_SHEETS) tables.push({ cfg, table: merged[cfg.sheet] || { headers: [], rows: [] } });
+    }
+  }
 
   const ready = tables.map(({ cfg, table }) => prepare(cfg, table)).filter(Boolean);
   fs.mkdirSync(OUT_DIR, { recursive: true });
