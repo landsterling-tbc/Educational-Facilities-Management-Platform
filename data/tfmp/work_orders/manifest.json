@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-11-03T06:09:45.363Z",
+  "sheets": {
+    "work-orders": {
+      "file": "work-orders.json",
+      "quarters": [
+        "2026-Q1",
+        "2026-Q2",
+        "2026-Q3",
+        "2026-Q4"
+      ],
+      "total_count": 58337,
+      "quarterField": "Assignment Month"
+    },
+    "inspection-details": {
+      "file": "inspection-details.json",
+      "quarters": [
+        "2026-Q1",
+        "2026-Q2",
+        "2026-Q3",
+        "2026-Q4"
+      ],
+      "total_count": 348594,
+      "quarterField": "Submitted At"
+    },
+    "ca-details": {
+      "file": "ca-details.json",
+      "quarters": [
+        "2026-Q2",
+        "2026-Q3",
+        "2026-Q4"
+      ],
+      "total_count": 133720,
+      "quarterField": "Submitted At"
+    },
+    "ir-details": {
+      "file": "ir-details.json",
+      "quarters": [
+        "2026-Q2",
+        "2026-Q3",
+        "2026-Q4"
+      ],
+      "total_count": 12873,
+      "quarterField": "Submitted At"
+    },
+    "checklist-details": {
+      "file": "checklist-details.json",
+      "quarters": [
+        "2026-Q4"
+      ],
+      "total_count": 27940,
+      "quarterField": "Submitted At"
+    }
+  }
+}
