@@ -170,43 +170,88 @@ function normDate(v) {
 }
 
 // وصف كل شيت: اسمه في الملف، الأعمدة الإلزامية للتحقق منه، وأعمدة التاريخ التي تُطبَّع
+// ★★★★ 2026-11-03: كل شيت دلوقتي بيُقسَّم لملفات فصلية (quarter) بدل ملف
+// واحد مجمّع يكبر للأبد — base هو اسم المجلد الفرعي، quarterField هو العمود
+// اللي بيحدد ربع السنة (مع quarterFallbackField لو الأساسي فاضي)، نفس فكرة
+// "Assignment Month" اللي الداشبورد بيستخدمها في فلتر الفترة بالفعل. راجع
+// manifest.json وتعليق بناء الربع تحت لتفاصيل الآلية.
 const SHEETS = [
   {
     sheet: 'Work Orders',
     file: 'work-orders.json',
+    base: 'work-orders',
     source: 'tfmp-wo-export-work-orders',
     required: ['WO #', 'Status', 'Primary School', 'Ministry ID', 'Created', 'Completed'],
     dateCols: ['Created', 'Scheduled Start', 'Started', 'Completed'],
+    quarterField: 'Assignment Month',
+    quarterFallbackField: 'Created',
   },
   {
     sheet: 'Inspection Details',
     file: 'inspection-details.json',
+    base: 'inspection-details',
     source: 'tfmp-wo-export-inspection-details',
     required: ['WO #', 'Section', 'Area Code', 'Area Name (EN)', 'Submitted At'],
     dateCols: ['Submitted At'],
+    quarterField: 'Submitted At',
   },
   {
     sheet: 'CA Details',
     file: 'ca-details.json',
+    base: 'ca-details',
     source: 'tfmp-wo-export-ca-details',
     required: ['WO #', 'Item Code', 'Item Name (EN)', 'Rating (1–5)', 'Submitted At'],
     dateCols: ['Submitted At'],
+    quarterField: 'Submitted At',
   },
   {
     sheet: 'IR Details',
     file: 'ir-details.json',
+    base: 'ir-details',
     source: 'tfmp-wo-export-ir-details',
     required: ['WO #', 'Section Code', 'Area Code', 'QA Outcome', 'Submitted At'],
     dateCols: ['Submitted At'],
+    quarterField: 'Submitted At',
   },
   {
     sheet: 'Checklist Details',
     file: 'checklist-details.json',
+    base: 'checklist-details',
     source: 'tfmp-wo-export-checklist-details',
     required: ['WO #', 'Checklist', 'Item Code', 'Answer', 'Submitted At'],
     dateCols: ['Submitted At'],
+    quarterField: 'Submitted At',
   },
 ];
+
+// أعمدة "Assignment Month" بشكل YYYY-MM، وأعمدة التاريخ التفصيلية بشكل
+// dd/mm/yyyy (بعد normDate) — دالتين بسيطتين لاستخراج "YYYY-Qn" من كل شكل
+function quarterKeyFromAssignmentMonth(v) {
+  const m = String(v || '').match(/^(\d{4})-(\d{2})/);
+  if (!m) return null;
+  return m[1] + '-Q' + Math.ceil(Number(m[2]) / 3);
+}
+function quarterKeyFromDdMmYyyy(v) {
+  const m = String(v || '').match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!m) return null;
+  return m[3] + '-Q' + Math.ceil(Number(m[2]) / 3);
+}
+// يقسّم صفوف شيت واحد على أرباع السنة — صف من غير تاريخ صالح (نادر) يروح
+// لربع "unresolved" بدل ما يضيع أو يوقف التشغيل كله
+function bucketByQuarter(cfg, table) {
+  const fIdx = table.headers.indexOf(cfg.quarterField);
+  const fbIdx = cfg.quarterFallbackField ? table.headers.indexOf(cfg.quarterFallbackField) : -1;
+  const buckets = {};
+  for (const r of table.rows) {
+    let key = cfg.quarterField === 'Assignment Month'
+      ? quarterKeyFromAssignmentMonth(r[fIdx])
+      : quarterKeyFromDdMmYyyy(r[fIdx]);
+    if (!key && fbIdx >= 0) key = quarterKeyFromDdMmYyyy(r[fbIdx]);
+    if (!key) key = 'unresolved';
+    (buckets[key] = buckets[key] || []).push(r);
+  }
+  return buckets;
+}
 
 function readSheet(wb, cfg, opts) {
   opts = opts || {};
@@ -236,19 +281,44 @@ function readSheet(wb, cfg, opts) {
   return { headers, rows };
 }
 
-function prepare(cfg, table) {
-  const file = path.join(OUT_DIR, cfg.file);
+// بدل ملف واحد لكل شيت، دلوقتي ملف لكل (شيت × ربع سنة) —
+// data/tfmp/work_orders/<base>/<YYYY-Qn>.json — بنفس شكل { fetched_at,
+// source, count, headers, rows } القديم تمامًا، فقط مقسّم. نفس فحص "مفيش
+// انخفاض مفاجئ كبير" بس على مستوى كل ربع لوحده (مقارنة بنفس الربع في آخر
+// سحب)، ونفس "لو مفيش تغيير متحفظش الملف" — يعني الأرباع المستقرة (شهور
+// قديمة خلصت) هتفضل زي ما هي تلقائيًا من غير أي تدخل يدوي.
+function prepareQuarter(cfg, quarterKey, rows, headers) {
+  const dir = path.join(OUT_DIR, cfg.base);
+  const file = path.join(dir, quarterKey + '.json');
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {}
-  // فحص سلامة عام: انخفاض كبير مفاجئ في عدد الصفوف عن آخر سحب ناجح مريب (ممكن يبقى خطأ في الرابط أو التصريح)
-  if (prev && prev.count && table.rows.length < prev.count * 0.9) {
-    throw new Error(cfg.sheet + ': عدد الصفوف الجديد (' + table.rows.length + ') أقل بكثير من السابق (' + prev.count + ') — لن يُستبدل الملف');
+  if (prev && prev.count && rows.length < prev.count * 0.9) {
+    throw new Error(cfg.sheet + ' [' + quarterKey + ']: عدد الصفوف الجديد (' + rows.length + ') أقل بكثير من السابق (' + prev.count + ') — لن يُستبدل الملف');
   }
-  if (prev && prev.count === table.rows.length && JSON.stringify(prev.headers) === JSON.stringify(table.headers) && JSON.stringify(prev.rows) === JSON.stringify(table.rows)) {
-    console.log('لا تغيير في "' + cfg.sheet + '" منذ آخر سحب — لن يُعاد حفظ الملف');
-    return null;
+  if (prev && prev.count === rows.length && JSON.stringify(prev.headers) === JSON.stringify(headers) && JSON.stringify(prev.rows) === JSON.stringify(rows)) {
+    return null; // مفيش تغيير — سيب الملف زي ما هو
   }
-  return { file, out: { fetched_at: new Date().toISOString(), source: cfg.source, count: table.rows.length, headers: table.headers, rows: table.rows } };
+  return { dir, file, out: { fetched_at: new Date().toISOString(), source: cfg.source, count: rows.length, headers, rows } };
+}
+
+// manifest.json: قايمة الأرباع الموجودة فعليًا على القرص لكل شيت (بعد
+// الكتابة)، عشان dashboard.js يعرف يجيب إيه من غير ما يخمّن أسماء ملفات —
+// بيُبنى بمسح المجلدات مش من نتيجة هذا التشغيل بس، لأن أرباع قديمة مستقرة
+// ممكن متتكتبش في هذا التشغيل بالذات لكن لازم تفضل في المانيفست
+function buildManifest() {
+  const manifest = { generated_at: new Date().toISOString(), sheets: {} };
+  for (const cfg of SHEETS) {
+    const dir = path.join(OUT_DIR, cfg.base);
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch (e) {}
+    let total = 0;
+    const quarters = files.map((f) => f.replace(/\.json$/, '')).sort();
+    for (const f of files) {
+      try { total += JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')).count || 0; } catch (e) {}
+    }
+    manifest.sheets[cfg.base] = { file: cfg.file, quarters, total_count: total, quarterField: cfg.quarterField };
+  }
+  return manifest;
 }
 
 const WO_SHEET_CFG = SHEETS[0]; // "Work Orders" — أول عنصر في SHEETS
@@ -337,15 +407,43 @@ async function main() {
     }
   }
 
-  const ready = tables.map(({ cfg, table }) => prepare(cfg, table)).filter(Boolean);
+  const ready = [];
+  for (const { cfg, table } of tables) {
+    const buckets = bucketByQuarter(cfg, table);
+    const unresolvedCount = (buckets.unresolved || []).length;
+    if (unresolvedCount) console.log('  تنبيه: ' + unresolvedCount + ' صف في "' + cfg.sheet + '" بدون تاريخ صالح — في ربع "unresolved"');
+    for (const quarterKey of Object.keys(buckets).sort()) {
+      const r = prepareQuarter(cfg, quarterKey, buckets[quarterKey], table.headers);
+      if (r) ready.push(r);
+    }
+  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  for (const { file, out } of ready) {
+  for (const { dir, file, out } of ready) {
+    fs.mkdirSync(dir, { recursive: true });
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(out));
     fs.renameSync(tmp, file);
     console.log('✔ حُفظ ' + out.count + ' صفًا و' + out.headers.length + ' عمودًا في', file);
   }
   if (!ready.length) console.log('لا تغيير في أي شيت — لم يُحفظ شيء');
+  // manifest.json يُعاد بناؤه دايمًا (حتى لو مفيش تغيير في البيانات) عشان
+  // يفضل يعكس كل الأرباع الموجودة فعليًا على القرص
+  const manifest = buildManifest();
+  fs.writeFileSync(path.join(OUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  console.log('✔ تحديث manifest.json');
+
+  // أول تشغيل بعد التحديث للتقسيم الفصلي: امسح الملفات المجمّعة القديمة
+  // (work-orders.json القديم... إلخ) لو موجودة — بقت كل بياناتها موجودة في
+  // الملفات الفصلية الجديدة، وmanifest.json بقى المرجع الوحيد اللي
+  // dashboard.js بيعتمد عليه (مع fallback للملف القديم لو manifest.json
+  // مش موجود لأي سبب — راجع _woEnsureLoaded في dashboard.js)
+  for (const cfg of SHEETS) {
+    const oldFile = path.join(OUT_DIR, cfg.file);
+    if (fs.existsSync(oldFile)) {
+      fs.unlinkSync(oldFile);
+      console.log('🗑 حُذف الملف المجمّع القديم:', oldFile);
+    }
+  }
 }
 
 main().catch((e) => { console.error('❌ فشل السحب:', e.message); process.exit(1); });
