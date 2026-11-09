@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-08T11:43:24.010Z",
+  "generated_at": "2026-11-09T13:39:30.127Z",
   "sheets": {
     "work-orders": {
       "file": "work-orders.json",
@@ -9,7 +9,7 @@
         "2026-Q3",
         "2026-Q4"
       ],
-      "total_count": 58346,
+      "total_count": 58484,
       "quarterField": "Assignment Month"
     },
     "inspection-details": {
@@ -20,7 +20,7 @@
         "2026-Q3",
         "2026-Q4"
       ],
-      "total_count": 348615,
+      "total_count": 348636,
       "quarterField": "Submitted At"
     },
     "ca-details": {
@@ -30,7 +30,7 @@
         "2026-Q3",
         "2026-Q4"
       ],
-      "total_count": 133885,
+      "total_count": 134116,
       "quarterField": "Submitted At"
     },
     "ir-details": {
@@ -48,7 +48,7 @@
       "quarters": [
         "2026-Q4"
       ],
-      "total_count": 90717,
+      "total_count": 107888,
       "quarterField": "Submitted At"
     }
   }
